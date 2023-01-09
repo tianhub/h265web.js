@@ -1,6 +1,6 @@
-/********************************************************* 
+/*********************************************************
  * LICENSE: GPL-3.0 https://www.gnu.org/licenses/gpl-3.0.txt
- * 
+ *
  * Author: Numberwolf - ChangYanlong
  * QQ: 531365872
  * QQ Group:925466059
@@ -8,7 +8,7 @@
  * Discord: numberwolf#8694
  * E-Mail: porschegt23@foxmail.com
  * Github: https://github.com/numberwolf/h265web.js
- * 
+ *
  * 作者: 小老虎(Numberwolf)(常炎隆)
  * QQ: 531365872
  * QQ群: 531365872
@@ -17,7 +17,7 @@
  * 邮箱: porschegt23@foxmail.com
  * 博客: https://www.jianshu.com/u/9c09c1e00fd1
  * Github: https://github.com/numberwolf/h265web.js
- * 
+ *
  **********************************************************/
 /*
  * Video
@@ -65,6 +65,16 @@ module.exports = {
     PLAYER_CORE_TYPE_DEFAULT: 0, // 默认播放器
     PLAYER_CORE_TYPE_CNATIVE: 1, // 包括demuxer decoder全部走C FFmpeg Native的
 
+    PLAYER_CNATIVE_VOD_RETRY_MAX: 3,
+
+    URI_PROTOCOL_WEBSOCKET: 'ws',
+    URI_PROTOCOL_WEBSOCKET_DESC: 'websocket',
+    URI_PROTOCOL_HTTP: 'http',
+    URI_PROTOCOL_HTTP_DESC: 'http',
+
+    FETCH_FIRST_MAX_TIMES: 5,
+    FETCH_HTTP_FLV_TIMEOUT_MS: 7 * 1000,
+
     V_CODEC_NAME_HEVC : 265,
     V_CODEC_NAME_AVC  : 264,
     V_CODEC_NAME_UNKN : 500,
@@ -76,4 +86,6 @@ module.exports = {
     CACHE_NO_LOADCACHE      : 0xC0,
     CACHE_WITH_PLAY_SIGN    : 0xC1,
     CACHE_WITH_NOPLAY_SIGN  : 0xC2,
+
+    V_CODEC_AVC_DEFAULT_FPS : 25,
 }; // module export

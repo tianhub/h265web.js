@@ -19,6 +19,7 @@
  * Github: https://github.com/numberwolf/h265web.js
  * 
  **********************************************************/
+const AVCommon = require('../decoder/av-common');
 function Texture(gl) {
     this.gl = gl;
     this.texture = gl.createTexture();
@@ -142,7 +143,10 @@ function setupCanvas(canvas, options) {
 
 function renderFrame(gl, 
     videoFrameY, videoFrameB, videoFrameR,
-    width, height) {
+    width, height) 
+{
+
+    // let start_t = AVCommon.GetMsTime();
     gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
     // gl.viewport(0, 0, width + width % 4, height);
     gl.clearColor(0.0, 0.0, 0.0, 0.0);
@@ -152,6 +156,29 @@ function renderFrame(gl,
     gl.u.fill(width >> 1, height >> 1, videoFrameB);
     gl.v.fill(width >> 1, height >> 1, videoFrameR);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // let end_t = AVCommon.GetMsTime();
+    // console.log("js debug renderFrame cost:", end_t - start_t);
+}
+
+// release
+function releaseContext(gl) {
+    // gl.y = new Texture(gl);
+    // gl.u = new Texture(gl);
+    // gl.v = new Texture(gl);
+    // gl.y.bind(0, program, "YTexture");
+    // gl.u.bind(1, program, "UTexture");
+    // gl.v.bind(2, program, "VTexture");
+
+    // this.texture = gl.createTexture();
+    // gl.bindTexture(gl.TEXTURE_2D, this.texture);
+
+    gl.deleteTexture(gl.y.texture); 
+    gl.deleteTexture(gl.u.texture);
+    gl.deleteTexture(gl.v.texture); 
+    // gl.deleteBuffer(someBuffer); 
+    // gl.deleteBuffer(someOtherBuffer); 
+    // gl.deleteRenderbuffer(someRenderbuffer); 
+    // gl.deleteFramebuffer(someFramebuffer); 
 }
 
 
@@ -204,7 +231,8 @@ function fullscreen() {
 
 module.exports = {
     renderFrame : renderFrame,
-    setupCanvas : setupCanvas
+    setupCanvas : setupCanvas,
+    releaseContext : releaseContext
 };
 
 /* Player controls Ends Here */

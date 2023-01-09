@@ -80,6 +80,7 @@ var RawParserModule = /*#__PURE__*/function () {
     value: function clearFrameRet() {
       this.frameList = null;
     }
+
     /*
      *****************************************************
      *                                                   *
@@ -99,6 +100,7 @@ var RawParserModule = /*#__PURE__*/function () {
     value: function getStreamRet() {
       return this.stream;
     }
+
     /**
      * push stream nalu, for live, not vod
      * @param Uint8Array
@@ -136,6 +138,7 @@ var RawParserModule = /*#__PURE__*/function () {
       }
       return true;
     }
+
     /**
      * sub nalu stream, and get Nalu unit
      */
@@ -150,6 +153,7 @@ var RawParserModule = /*#__PURE__*/function () {
       this.stream = new Uint8Array(this.stream.subarray(endOpen + 1));
       return returnBuf;
     }
+
     /**
      * @param onceGetNalCount: once use get nal count, defult 1
      * @return uint8array OR false
@@ -258,6 +262,7 @@ var RawParserModule = /*#__PURE__*/function () {
       } // end for
       return false;
     }
+
     /**
      * @brief sub nalu stream, and get Nalu unit
      *          to parse: 

@@ -23,6 +23,7 @@ const Player = require('./decoder/player-core');
 const PlayerNative = require('./native/mp4-player');
 const CNativeCore = require('./decoder/c-native-core');
 const CHttpLiveCore = require('./decoder/c-httplive-core');
+const CWsLiveCore = require('./decoder/c-wslive-core');
 const NvVideoJSCore = require('./native/nv-videojs-core');
 const NvFlvJSCore = require('./native/nv-flvjs-core');
 const AVCOMMON = require('./decoder/av-common');
@@ -34,9 +35,13 @@ const def = require('./consts');
 const staticMem = require('./utils/static-mem');
 const UI = require('./utils/ui/ui');
 const CacheYUV = require('./decoder/cache');
+const RenderEngine420P = require('./render-engine/webgl-420p');
+
 // const Module = require('./decoder/missile.js');
 // const RawParser = require('./decoder/raw-parser');
 // http://localhost:8080/h265webjs-roi/
+
+// const MAX_RETRY_GET_MISSILE_STATE_COUNT = 3;
 
 const DEFAULT_CONFIG_EXT = {
     moovStartFlag : true,
@@ -48,6 +53,7 @@ const DEFAULT_CONFIG_EXT = {
     checkProbe : true,
     ignoreAudio : 0, // 0 no 1 yes
     probeSize : 4096,
+    autoPlay : false,
 }; // DEFAULT_CONFIG_EXT
 
 /**
@@ -75,6 +81,20 @@ Module.onRuntimeInitialized = () => {
     // _this._playUtilShowMask();
 }; // onRuntimeInitialized
 
+window.addEventListener("wasmLoaded", function()
+{
+    // document.domain = COMMON_DEF.RUN_DOMAIN;
+    // document.domain = RUN_DOMAIN;
+    global.STATIC_MEM_wasmDecoderState = 1;
+    console.log("wasmLoaded");
+    // Run();
+}); // wasmLoaded
+
+global.onWASMLoaded = function() {
+    global.STATIC_MEM_wasmDecoderState = 1;
+    console.log("onWASMLoaded");
+};
+
 class H265webjsModule {
     // static myStaticProp = 42;
 
@@ -101,6 +121,16 @@ class H265webjsModule {
 
         // this.uiObj = new UI.UI();
 
+        // this.snapshotCanvas = null;
+        this.snapshotCanvasContext = null;
+        this.snapshotYuvLastFrame = {
+            width: 0,
+            height: 0,
+            luma: null,
+            chromaB: null,
+            chromaR: null
+        }; // snapshotYuvLastFrame
+
         // val
         this.videoURL = videoURL;
         this.configFormat = {
@@ -118,6 +148,12 @@ class H265webjsModule {
             extInfo : DEFAULT_CONFIG_EXT
         }; // configFormat
         this.mediaExtFormat = this.configFormat.type;
+        this.mediaExtProtocol = null;
+        if (this.videoURL !== undefined && this.videoURL !== null) {
+            this.mediaExtProtocol = AVCOMMON.GetUriProtocol(this.videoURL);
+        }
+
+        console.log("GetUriProtocol", this.mediaExtProtocol, this.mediaExtFormat);
 
         // alert(this.configFormat.type);
 
@@ -181,6 +217,7 @@ class H265webjsModule {
         this.onCloseFullScreen = null;
         this.onNetworkError = null;
         this.onMakeItReady = null;
+        this.onPlayState = null;
 
         this.filterConfigParams();
         console.log("configFormat ==> ", this.configFormat);
@@ -200,7 +237,7 @@ class H265webjsModule {
 
         this.screenW = window.screen.width;
         this.screenH = window.screen.height;
-    }
+    } // constructor
 
     filterConfigParams() {
         if (this.configFormat.extInfo.checkProbe === undefined || this.configFormat.extInfo.checkProbe === null) {
@@ -209,7 +246,7 @@ class H265webjsModule {
 
         if (this.configFormat.type === def.PLAYER_IN_TYPE_FLV) {
             this.configFormat.extInfo.core  = def.PLAYER_CORE_TYPE_CNATIVE;
-            this.configFormat.type          = def.PLAYER_IN_TYPE_MP4; // @TODO LIVE
+            this.configFormat.type          = def.PLAYER_IN_TYPE_MP4; // LIVE
 
         } else if (this.configFormat.type === def.PLAYER_IN_TYPE_HTTPFLV) {
             this.configFormat.extInfo.core  = def.PLAYER_CORE_TYPE_CNATIVE;
@@ -298,6 +335,9 @@ class H265webjsModule {
     }
 
     release() {
+        if (this.player === undefined || this.player === null) {
+            return false;
+        }
         console.log("===>", this.player);
         if (this.playParam.videoCodec === def.CODEC_H265 && this.player) {
             if (this.configFormat.type == def.PLAYER_IN_TYPE_M3U8) {
@@ -307,6 +347,29 @@ class H265webjsModule {
         } else {
             this.player.release(); // keep
         }
+
+        if (this.snapshotCanvasContext !== undefined &&
+            this.snapshotCanvasContext !== null) 
+        {
+            RenderEngine420P.releaseContext(this.snapshotCanvasContext);
+            this.snapshotCanvasContext = null;
+
+            if (this.snapshotYuvLastFrame !== undefined && 
+                this.snapshotYuvLastFrame !== null) 
+            {
+                this.snapshotYuvLastFrame.luma     = null;
+                this.snapshotYuvLastFrame.chromaB  = null;
+                this.snapshotYuvLastFrame.chromaR  = null;
+
+                this.snapshotYuvLastFrame.width    = 0;
+                this.snapshotYuvLastFrame.height   = 0;
+            }
+        } // end free snapshot info
+
+        this.configFormat.extInfo.readyShow = true;
+
+        window.onclick = document.body.onclick = null;
+        return true;
     }
 
     debugYUV(debugID) {
@@ -314,10 +377,18 @@ class H265webjsModule {
     }
 
     setRenderScreen(setVal = false) {
+        if (this.player === undefined || this.player === null) {
+            return false;
+        }
         this.player.setScreen(setVal);
+        return true;
     }
 
     play() {
+        if (this.player === undefined || this.player === null) {
+            return false;
+        }
+
         // this._playUtilHiddenMask();
         if (this.playParam.videoCodec === def.CODEC_H265) {
             let playParams = {
@@ -335,6 +406,9 @@ class H265webjsModule {
     }
 
     pause() {
+        if (this.player === undefined || this.player === null) {
+            return false;
+        }
         console.log("=====================PAUSE====================");
         // this._playerUtilBuildMask(this.configFormat.playIcon);
         // this._playUtilShowMask();
@@ -343,6 +417,9 @@ class H265webjsModule {
     }
 
     isPlaying() {
+        if (this.player === undefined || this.player === null) {
+            return false;
+        }
         return this.player.isPlayingState();
     }
 
@@ -351,8 +428,12 @@ class H265webjsModule {
             console.log("voice must larger than 0.0!");
             return false;
         }
+        if (this.player === undefined || this.player === null) {
+            return false;
+        }
         this.volume = voice;
         this.player && this.player.setVoice(voice);
+        return true;
     }
 
     getVolume() {
@@ -368,8 +449,71 @@ class H265webjsModule {
         return mediaInfoData;
     }
 
+    snapshot(canvasDom=null)
+    {
+        if (canvasDom === null) {
+            return null;
+        }
+
+        let _this = this; // this.snapshotCanvas
+        if (this.playParam !== undefined && this.playParam !== null)
+        {
+            // this.snapshotCanvas = canvasDom;
+
+            // audioNone: false // 是否不包含音频轨
+            // durationMs: 600000 // 时长 毫秒级
+            // fps: 25 // 帧率
+            // sampleRate: 44100 // 音频采样率
+            // size: // 视频分辨率
+            //     height: 720
+            //     width: 1280
+            // videoCodec: 0 // 0:HEVC/H.265 1:其他编码
+            // isHEVC: true // 是否是H265编码视频
+
+            if (this.playParam.videoCodec === 0) { // HEVC
+                this.player.setScreen(true);
+
+                canvasDom.width = this.snapshotYuvLastFrame.width;
+                canvasDom.height = this.snapshotYuvLastFrame.height;
+                console.log("this.snapshotYuvLastFrame", this.snapshotYuvLastFrame);
+
+                // RenderEngine420P
+                if (this.snapshotCanvasContext === undefined || 
+                    this.snapshotCanvasContext === null)
+                {
+                    this.snapshotCanvasContext = RenderEngine420P.setupCanvas(
+                        canvasDom, 
+                        {
+                            preserveDrawingBuffer: false
+                        }
+                    ); // snapshotCanvasContext
+                }
+
+                RenderEngine420P.renderFrame(
+                    this.snapshotCanvasContext,
+                    this.snapshotYuvLastFrame.luma, 
+                    this.snapshotYuvLastFrame.chromaB, 
+                    this.snapshotYuvLastFrame.chromaR,
+                    this.snapshotYuvLastFrame.width, 
+                    this.snapshotYuvLastFrame.height);
+            } else { // AVC
+                canvasDom.width = this.playParam.size.width;
+                canvasDom.height = this.playParam.size.height;
+                canvasDom.getContext('2d').drawImage(
+                    this.player.videoTag, 
+                    0, 0, canvasDom.width, canvasDom.height);
+                
+            } // end check codec
+        } // check params exist
+
+        return null;
+    } // snapshot
+
     _seekHLS(clickedValue, _self, callback) {
         // alert("seekHLS" + clickedValue);
+        if (this.player === undefined || this.player === null) {
+            return false;
+        }
         setTimeout(function() {
             console.warn("this.player.getCachePTS()", _self.player.getCachePTS());
             if (_self.player.getCachePTS() > clickedValue) {
@@ -386,6 +530,11 @@ class H265webjsModule {
 
     seek(clickedValue) {
         console.log("============DEBUG===========> SEEK TO:", clickedValue);
+
+        if (this.player === undefined || this.player === null) {
+            return false;
+        }
+
         let _this = this;
         this.seekTarget = clickedValue;
 
@@ -482,6 +631,7 @@ class H265webjsModule {
     fullScreen() {
         this.autoScreenClose = true;
 
+        console.log("js debug fullScreen => ", this.player.vCodecID, this.player);
         if (this.player.vCodecID === def.V_CODEC_NAME_HEVC) {
             let glCanvasBox = document
                 .querySelector('#' + this.configFormat.playerId);
@@ -532,7 +682,35 @@ class H265webjsModule {
         }
 
         // this.autoScreenClose = true;
-    }
+    } // closeFullScreen
+
+    playNextFrame() {
+        this.pause();
+        if (this.playParam !== undefined && this.playParam !== null)
+        {
+            // this.snapshotCanvas = canvasDom;
+
+            // audioNone: false // 是否不包含音频轨
+            // durationMs: 600000 // 时长 毫秒级
+            // fps: 25 // 帧率
+            // sampleRate: 44100 // 音频采样率
+            // size: // 视频分辨率
+            //     height: 720
+            //     width: 1280
+            // videoCodec: 0 // 0:HEVC/H.265 1:其他编码
+            // isHEVC: true // 是否是H265编码视频
+
+            if (this.playParam.videoCodec === 0) { // HEVC
+                this.player.playYUV();
+            } else {
+                this.player.nativeNextFrame();
+            }
+
+            return true;
+        } // this.playParam
+
+        return false;
+    } // showNextFrame
 
     /**********
      Private
@@ -732,6 +910,10 @@ class H265webjsModule {
         let _this = this;
         console.warn("SEEK feedMP4Data:", secVideoIdx, secAudioIdx);
 
+        if (this.player === undefined || this.player === null) {
+            return false;
+        }
+
         let durationSec = parseInt(this.playParam.durationMs / 1000);
 
         // let alreadyPushThisSec = false;
@@ -811,8 +993,10 @@ class H265webjsModule {
             {
                 console.warn("videoFrame GET:", secVideoIdx, videoFrame.length);
                 // 首帧显示渲染
-                if (this.configFormat.extInfo.readyShow) {
-                    if (this.configFormat.type === def.PLAYER_IN_TYPE_M3U8) {
+                if (this.configFormat.extInfo.readyShow) 
+                {
+                    if (this.configFormat.type === def.PLAYER_IN_TYPE_M3U8) 
+                    {
                         this.configFormat.extInfo.readyShow = false;
                         // this.onReadyShowDone && this.onReadyShowDone();
                     } else {
@@ -826,8 +1010,15 @@ class H265webjsModule {
                             //     this.onReadyShowDone && this.onReadyShowDone();
                             // }
                         } else {
-                            if (this.player.cacheYuvBuf.getState() != CACHE_APPEND_STATUS_CODE.NULL) {
-                                this.player.playFrameYUV(true, true);
+                            if (this.player.cacheYuvBuf.getState() != CACHE_APPEND_STATUS_CODE.NULL) 
+                            {
+                                // if (this.player.playYUV(true, true) === true) {
+                                //     this.configFormat.extInfo.readyShow = false;
+                                //     this.onReadyShowDone && this.onReadyShowDone();
+                                // }
+                            }
+                            if (this.player.playYUV(true, true) === true) 
+                            {
                                 this.configFormat.extInfo.readyShow = false;
                                 this.onReadyShowDone && this.onReadyShowDone();
                             }
@@ -870,7 +1061,7 @@ class H265webjsModule {
                 return;
             }
         }, 5);
-    }
+    } // _avFeedMP4Data
 
     _makeMP4Player() {
         let _this = this;
@@ -880,9 +1071,15 @@ class H265webjsModule {
          */
         // alert("type: " + this.configFormat.type);
 
+        if (this.mediaExtProtocol === def.URI_PROTOCOL_WEBSOCKET_DESC) {
+            this._cWsFLVDecoderEntry();
+            return 0;
+        }
+
         if (this.configFormat.extInfo.core != undefined 
             && this.configFormat.extInfo.core !== null
-            && this.configFormat.extInfo.core === def.PLAYER_CORE_TYPE_CNATIVE) {
+            && this.configFormat.extInfo.core === def.PLAYER_CORE_TYPE_CNATIVE
+        ) { // @TODO make http-ts add here
             /*
              * PLAYER_CORE_TYPE_CNATIVE c demuxer decoder
              */
@@ -910,13 +1107,15 @@ class H265webjsModule {
             }
         }
 
-    } // end
+        return 0;
+    } // _makeMP4Player end
 
     /**
      * 内部公共调用的一个方法 创建播放器
      */
     _makeMP4PlayerViewEvent(
-        durationMs, fps, sampleRate, size, audioNone=false, videoCodec=null) {
+        durationMs, fps, sampleRate, size, audioNone=false, videoCodec=null) 
+    {
         let _this = this;
         // set play params in this entry
         this.playParam.durationMs = durationMs;
@@ -954,6 +1153,7 @@ class H265webjsModule {
             }
         }
 
+        console.log("start init player");
         this.player = Player({
             width: this.configFormat.playerW,
             height: this.configFormat.playerH,
@@ -984,9 +1184,27 @@ class H265webjsModule {
         this.player.onSeekFinish = () => {
             if (_this.onSeekFinish != null) _this.onSeekFinish();
         };
-        this.player.onRender = (width, height, imageBufferY, imageBufferB, imageBufferR) => {
-            if (this.onRender != null) {
-                this.onRender(width, height, imageBufferY, imageBufferB, imageBufferR);
+        this.player.onRender = (width, height, imageBufferY, imageBufferB, imageBufferR) => 
+        {
+            _this.snapshotYuvLastFrame.luma     = null;
+            _this.snapshotYuvLastFrame.chromaB  = null;
+            _this.snapshotYuvLastFrame.chromaR  = null;
+
+            _this.snapshotYuvLastFrame.width    = width;
+            _this.snapshotYuvLastFrame.height   = height;
+            _this.snapshotYuvLastFrame.luma     = new Uint8Array(imageBufferY);
+            _this.snapshotYuvLastFrame.chromaB  = new Uint8Array(imageBufferB);
+            _this.snapshotYuvLastFrame.chromaR  = new Uint8Array(imageBufferR);
+
+            // if (_this.snapshotCanvas !== undefined && 
+            //     _this.snapshotCanvas !== null) 
+            // {
+            //     _this.snapshotCanvas.width = width;
+            //     _this.snapshotCanvas.height = height;
+            // }
+
+            if (_this.onRender != null) {
+                _this.onRender(width, height, imageBufferY, imageBufferB, imageBufferR);
             }
         };
         this.player.onLoadCache = () => {
@@ -1007,11 +1225,10 @@ class H265webjsModule {
             _this.onLoadFinish();
             if (
                 _this.configFormat.type == def.PLAYER_IN_TYPE_M3U8) {
-                // @TODO
                 _this.onReadyShowDone && _this.onReadyShowDone();
             }
         }
-    }
+    } // _makeMP4PlayerViewEvent
 
     _makeNativePlayer(durationMs, fps, sampleRate, size, audioNone, videoCodec) {
         let _this = this;
@@ -1038,7 +1255,8 @@ class H265webjsModule {
             playerId: this.configFormat.playerId,
             audioNone: audioNone,
             token: this.configFormat.token,
-            videoCodec: videoCodec
+            videoCodec: videoCodec,
+            autoPlay: this.configFormat.extInfo.autoPlay,
         });
         this.player.makeIt(this.videoURL);
 
@@ -1058,8 +1276,13 @@ class H265webjsModule {
         this.player.onLoadFinish = () => {
             _this.playParam.durationMs = _this.player.duration * 1000;
             _this.onLoadFinish && _this.onLoadFinish();
+            _this.onReadyShowDone && _this.onReadyShowDone();
         };
-    }
+
+        this.player.onPlayState = (status) => {
+            _this.onPlayState && _this.onPlayState(status);
+        }; // onPlayState
+    } // _makeNativePlayer
 
     _initMp4BoxObject() {
         // demux mp4
@@ -1086,7 +1309,7 @@ class H265webjsModule {
                 this._makeNativePlayer(durationMs, fps, sampleRate, size, this.mp4Obj.audioNone, videoCodec);
             }
         };
-    }
+    } // _initMp4BoxObject
 
     /********************************************************************
      ********************************************************************
@@ -1209,9 +1432,10 @@ class H265webjsModule {
      * Demuxer + Decoder
      *
      */
-    _cDemuxDecoderEntry() {
-        // alert("_cDemuxDecoderEntry" + this.configFormat.type);
+    _cDemuxDecoderEntry(retry=0) {
+        alert("_cDemuxDecoderEntry" + this.configFormat.type);
         let _this = this;
+        let probeSuccessed = false;
         // let playerConfBase = {
         //     width: this.configFormat.playerW,
         //     height: this.configFormat.playerH,
@@ -1232,6 +1456,7 @@ class H265webjsModule {
             checkProbe: this.configFormat.extInfo.checkProbe,
             ignoreAudio : this.configFormat.extInfo.ignoreAudio,
             playMode: this.playMode,
+            autoPlay: this.configFormat.extInfo.autoPlay,
         };
         this.player = new CNativeCore.CNativeCore(playerConfig); // end create player
 
@@ -1240,17 +1465,23 @@ class H265webjsModule {
             _this.onReadyShowDone && _this.onReadyShowDone();
         }; // onReadyShowDone
 
+        this.player.onRelease = () => {
+            // isReportNetworkErr = false;
+            controller.abort();
+        };
+
         /*
          *
          * Set Events
          *
          */
         this.player.onProbeFinish = () => { // GetRealDurationOfLastFramePTS(fps, this.mp4Obj.getDurationMs());
-            console.log("first probe ", _this.player.mediaInfo, _this.player.config);
+            probeSuccessed = true;
+            console.log("first probe ", _this.player.config);
             _this.playParam.fps          = _this.player.config.fps;
             _this.playParam.durationMs   = GetRealDurationOfLastFramePTS(_this.playParam.fps, _this.player.duration * 1000.0);
 
-            if (_this.player.duration < 0) { // @TODO LIVE
+            if (_this.player.duration < 0) { // LIVE
                 _this.playMode = def.PLAYER_MODE_NOTIME_LIVE;
                 alert("HTTP FLV LIVE");
             }
@@ -1284,7 +1515,7 @@ class H265webjsModule {
                         false, _this.playParam.videoCodec);
                 } else if (_this.mediaExtFormat === def.PLAYER_IN_TYPE_FLV) {
                     // todo flvjs
-                    _this._flvJsPlayer(); // @TODO flvjs
+                    _this._flvJsPlayer(); // flvjs
                 } else {
                     _this.onLoadFinish && _this.onLoadFinish();
                 }
@@ -1333,9 +1564,27 @@ class H265webjsModule {
             if (this.onLoadCacheFinshed != null) this.onLoadCacheFinshed();
         };
 
-        this.player.onRender = (width, height, imageBufferY, imageBufferB, imageBufferR) => {
-            if (this.onRender != null) {
-                this.onRender(width, height, imageBufferY, imageBufferB, imageBufferR);
+        this.player.onRender = (width, height, imageBufferY, imageBufferB, imageBufferR) => 
+        {
+            _this.snapshotYuvLastFrame.luma     = null;
+            _this.snapshotYuvLastFrame.chromaB  = null;
+            _this.snapshotYuvLastFrame.chromaR  = null;
+
+            _this.snapshotYuvLastFrame.width    = width;
+            _this.snapshotYuvLastFrame.height   = height;
+            _this.snapshotYuvLastFrame.luma     = new Uint8Array(imageBufferY);
+            _this.snapshotYuvLastFrame.chromaB  = new Uint8Array(imageBufferB);
+            _this.snapshotYuvLastFrame.chromaR  = new Uint8Array(imageBufferR);
+
+            // if (_this.snapshotCanvas !== undefined && 
+            //     _this.snapshotCanvas !== null) 
+            // {
+            //     _this.snapshotCanvas.width = width;
+            //     _this.snapshotCanvas.height = height;
+            // }
+
+            if (_this.onRender != null) {
+                _this.onRender(width, height, imageBufferY, imageBufferB, imageBufferR);
             }
         };
 
@@ -1348,77 +1597,127 @@ class H265webjsModule {
          * Start Execute Fetch
          *
          */
+        let fetchGetResp = false;
         let fetchFin = false;
         let fileSize = 0;
-        // let controller = new AbortController();
-        // let signal = controller.signal;
-        fetch(this.videoURL, {signal}).then(function(response) {
-            if (response.headers.has("Content-Length")) {
-                fileSize = response.headers.get("Content-Length");
-                // alert("==========setProbeSize:" + 
-                //     fileSize + ',' + _this.configFormat.extInfo.coreProbePart)
-                _this.player && _this.player.setProbeSize(fileSize * _this.configFormat.extInfo.coreProbePart);
-            } else if (_this.mediaExtFormat === def.PLAYER_IN_TYPE_FLV) {
-                // null is live module @TODO LIVE
-                // _this.player && _this.player.setProbeSize(4096);
-                controller.abort();
-                alert("FLV FIND");
-                _this.player.release();
-                _this.player = null;
-                _this._cLiveFLVDecoderEntry(playerConfig);
-                return true;
-            } else {
-                // default set 4096
-                _this.player && _this.player.setProbeSize(4096);
-            }
-            // alert("cnative start fetch" + response.headers.get("Content-Length") + _this.configFormat.type);
-            let pump = function(reader) {
-                console.log("start pump", reader);
-                return reader.read().then(function(result) {
-                    if (result.done) {
-                        // alert("========== RESULT DONE ===========");
-                        fetchFin = true;
-                        _this.player && _this.player.pushDone();
-                        // window.clearInterval(networkInterval);
-                        // 一切结束后启动定时器
-                        // playInterval = window.setInterval(() => {
-                        //     console.log("---------------- loop", new Date());
-                        //     readingLoopWithF32();
-                        // }, 50);
+
+        let fetchFuncInner = function(times) {
+            setTimeout(function() {
+                if (fetchGetResp === false) {
+                    
+                    controller.abort();
+                    controller = null;
+                    signal = null;
+
+                    if (times >= def.FETCH_FIRST_MAX_TIMES) {
+                        console.warn("stop retry", times);
                         return;
                     }
 
-                    // array buffer
-                    let res_arr_buf = result.value.buffer;
-                    let chunk = new Uint8Array(result.value.buffer);
-                    if (_this.player) {
-                        let pushRet = _this.player.pushBuffer(chunk);
-                        if (pushRet < 0) {
-                            let releaseRet = _this.player.release();
-                            console.log("releaseRet ===> 2 ", releaseRet);
-                            _this.player = null;
-                            // _this._makeNativePlayer(
-                            //     _this.playParam.durationMs, _this.playParam.fps, 
-                            //     _this.playParam.sampleRate, _this.playParam.size, 
-                            //     false, _this.playParam.videoCodec);
-                            _this._mp4EntryVodStream();
-                            return false;
-                        }
-                    }
-                    return pump(reader);
-                });
-            }; // end pump
+                    console.warn("start retry", times);
 
-            // window.setTimeout(() => {
-            return pump(response.body.getReader());
-            // }, 10);
-        }).catch(function(error) {
-            if (!error.toString().includes('user aborted')) {
-                console.error("cdemuxdecoder error", error);
-            } // end check error
-            // window.clearInterval(networkInterval);
-            return;
-        }); // end fetch
+                    controller = new AbortController();
+                    signal = controller.signal;
+                    let newTimes = times + 1;
+                    fetchFuncInner(newTimes);
+                }
+            }, def.FETCH_HTTP_FLV_TIMEOUT_MS);
+
+            fetch(_this.videoURL, {signal}).then(function(response) {
+                fetchGetResp = true;
+                if (response.headers.has("Content-Length")) {
+                    fileSize = response.headers.get("Content-Length");
+                    // alert("==========setProbeSize:" + 
+                    //     fileSize + ',' + _this.configFormat.extInfo.coreProbePart)
+                    _this.player && _this.player.setProbeSize(fileSize * _this.configFormat.extInfo.coreProbePart);
+                } else if (_this.mediaExtFormat === def.PLAYER_IN_TYPE_FLV) {
+                    // @TODO make http-ts here
+                    // null is live module LIVE
+                    // _this.player && _this.player.setProbeSize(4096);
+                    controller.abort();
+                    alert("FLV FIND");
+                    _this.player.release();
+                    _this.player = null;
+                    _this._cLiveFLVDecoderEntry(playerConfig);
+                    return true;
+                } else {
+                    // default set 4096
+                    _this.player && _this.player.setProbeSize(4096);
+                }
+                console.log("cnative start fetch" + response.headers.get("Content-Length") + _this.configFormat.type + _this.mediaExtFormat);
+                let pump = function(reader) {
+                    console.log("start pump", reader);
+                    return reader.read().then(function(result) {
+                        if (result.done) {
+                            if (probeSuccessed === true) {
+                                // alert("========== RESULT DONE ===========");
+                                fetchFin = true;
+                                // _this.player && _this.player.pushDone();
+                                // window.clearInterval(networkInterval);
+                                // 一切结束后启动定时器
+                                // playInterval = window.setInterval(() => {
+                                //     console.log("---------------- loop", new Date());
+                                //     readingLoopWithF32();
+                                // }, 50);
+                            } else {
+                                let releaseRet = _this.player.release();
+                                console.log("releaseRet ===> 3 ", releaseRet);
+                                _this.player = null;
+                                // _this._makeNativePlayer(
+                                //     _this.playParam.durationMs, _this.playParam.fps, 
+                                //     _this.playParam.sampleRate, _this.playParam.size, 
+                                //     false, _this.playParam.videoCodec);
+                                if (retry < def.PLAYER_CNATIVE_VOD_RETRY_MAX) {
+                                    _this._cDemuxDecoderEntry(retry++);
+                                    return true;
+                                } else {
+                                    _this._mp4EntryVodStream();
+                                    return false;
+                                }
+                            }
+                            return true;
+                        }
+
+                        // array buffer
+                        let res_arr_buf = result.value.buffer;
+                        let chunk = new Uint8Array(result.value.buffer);
+                        if (_this.player) {
+                            let pushRet = _this.player.pushBuffer(chunk);
+                            if (pushRet < 0) {
+                                let releaseRet = _this.player.release();
+                                console.log("releaseRet ===> 2 ", releaseRet);
+                                _this.player = null;
+                                // _this._makeNativePlayer(
+                                //     _this.playParam.durationMs, _this.playParam.fps, 
+                                //     _this.playParam.sampleRate, _this.playParam.size, 
+                                //     false, _this.playParam.videoCodec);
+                                if (retry < def.PLAYER_CNATIVE_VOD_RETRY_MAX) {
+                                    _this._cDemuxDecoderEntry(retry++);
+                                    return true;
+                                } else {
+                                    _this._mp4EntryVodStream();
+                                    return false;
+                                }
+                            }
+                        }
+                        return pump(reader);
+                    });
+                }; // end pump
+
+                // window.setTimeout(() => {
+                return pump(response.body.getReader());
+                // }, 10);
+            }).catch(function(error) {
+                if (!error.toString().includes('user aborted')) {
+                    console.error("cdemuxdecoder error", error);
+                } // end check error
+                console.warn("error", error);
+                // window.clearInterval(networkInterval);
+                return;
+            }); // end fetch
+        }; // end fetchFuncInner
+
+        fetchFuncInner(0);
 
     } // _cDemuxDecoderEntry
 
@@ -1426,10 +1725,120 @@ class H265webjsModule {
         let _this = this;
         playerConfig.probeSize = this.configFormat.extInfo.probeSize;
         this.player = new CHttpLiveCore.CHttpLiveCore(playerConfig);
-        alert("probeSize" + playerConfig.probeSize);
+        console.log("_cLiveFLVDecoderEntry playerConfig", playerConfig);
         /*
          *
-         * Set Events @TODO
+         * Set Events
+         *
+         */
+        this.player.onProbeFinish = () => { // GetRealDurationOfLastFramePTS(fps, this.mp4Obj.getDurationMs());
+            _this.playParam.fps          = _this.player.mediaInfo.fps;
+            _this.playParam.durationMs   = -1;
+
+            _this.playMode = def.PLAYER_MODE_NOTIME_LIVE;
+            // alert("HTTP FLV LIVE");
+
+            _this.playParam.sampleRate   = _this.player.mediaInfo.sampleRate;
+            _this.playParam.size = {
+                width   : _this.player.mediaInfo.width,
+                height  : _this.player.mediaInfo.height
+            };
+            _this.playParam.audioNone = _this.player.mediaInfo.audioNone;
+
+            console.log("_cLiveFLVDecoderEntry _this.player.mediaInfo", _this.player.mediaInfo);
+
+            if (_this.player.vCodecID === def.V_CODEC_NAME_HEVC) {
+                if (_this.playParam.audioIdx < 0) {
+                    _this.playParam.audioNone = true;
+                }
+                _this.playParam.videoCodec = def.CODEC_H265;
+                _this.onLoadFinish && _this.onLoadFinish();
+
+            } else {
+                // need 264 codec, but do not use
+                _this.playParam.videoCodec = def.CODEC_H264;
+                let releaseRet = _this.player.release();
+                console.log("releaseRet ===> ", releaseRet);
+                _this.player = null;
+                _this._flvJsPlayer(_this.playParam.durationMs);
+            }
+            // _this.onLoadFinish && _this.onLoadFinish();
+        }; // onProbeFinish
+
+        this.player.onNetworkError = (error) => {
+            // alert("onNetworkError" + error.toString());
+            _this.onNetworkError && _this.onNetworkError(error);
+        }; // onNetworkError
+
+        this.player.onReadyShowDone = () => {
+            _this.configFormat.extInfo.readyShow = false;
+            _this.onReadyShowDone && _this.onReadyShowDone();
+        }; // onReadyShowDone
+
+        this.player.onLoadCache = () => {
+            // this._playerUtilBuildMask(this.configFormat.loadIcon);
+            // this._playUtilShowMask();
+            if (this.onLoadCache != null) this.onLoadCache();
+        }; // onLoadCache
+
+        this.player.onLoadCacheFinshed = () => {
+            // this._playUtilHiddenMask();
+            if (this.onLoadCacheFinshed != null) this.onLoadCacheFinshed();
+        }; // onLoadCacheFinshed
+
+        this.player.onRender = (width, height, imageBufferY, imageBufferB, imageBufferR) => 
+        {
+            _this.snapshotYuvLastFrame.luma     = null;
+            _this.snapshotYuvLastFrame.chromaB  = null;
+            _this.snapshotYuvLastFrame.chromaR  = null;
+
+            _this.snapshotYuvLastFrame.width    = width;
+            _this.snapshotYuvLastFrame.height   = height;
+            _this.snapshotYuvLastFrame.luma     = new Uint8Array(imageBufferY);
+            _this.snapshotYuvLastFrame.chromaB  = new Uint8Array(imageBufferB);
+            _this.snapshotYuvLastFrame.chromaR  = new Uint8Array(imageBufferR);
+
+            // if (_this.snapshotCanvas !== undefined && 
+            //     _this.snapshotCanvas !== null) 
+            // {
+            //     _this.snapshotCanvas.width = width;
+            //     _this.snapshotCanvas.height = height;
+            // }
+
+            if (_this.onRender != null) {
+                _this.onRender(width, height, imageBufferY, imageBufferB, imageBufferR);
+            }
+        }; // onRender
+
+        this.player.onPlayState = (status) => {
+            _this.onPlayState && _this.onPlayState(status);
+        }; // onPlayState
+
+        // boot
+        this.player.start(this.videoURL);
+        // this.playMode = def.PLAYER_MODE_NOTIME_LIVE;
+    } // _cLiveFLVDecoderEntry
+
+    _cWsFLVDecoderEntry() {
+        let _this = this;
+        let playerConfig = {
+            width: this.configFormat.playerW,
+            height: this.configFormat.playerH,
+            playerId: this.configFormat.playerId,
+            token: this.configFormat.token,
+            readyShow: this.configFormat.extInfo.readyShow,
+            checkProbe: this.configFormat.extInfo.checkProbe,
+            ignoreAudio : this.configFormat.extInfo.ignoreAudio,
+            playMode: this.playMode,
+            autoPlay: this.configFormat.extInfo.autoPlay,
+        };
+        playerConfig.probeSize = this.configFormat.extInfo.probeSize;
+        this.player = new CWsLiveCore.CWsLiveCore(playerConfig);
+        alert("_cWsFLVDecoderEntry probeSize" + playerConfig.probeSize);
+        console.log("_cWsFLVDecoderEntry playerConfig", playerConfig);
+        /*
+         *
+         * Set Events
          *
          */
         this.player.onProbeFinish = () => { // GetRealDurationOfLastFramePTS(fps, this.mp4Obj.getDurationMs());
@@ -1456,12 +1865,12 @@ class H265webjsModule {
                 _this.onLoadFinish && _this.onLoadFinish();
 
             } else {
-                // @TODO need 264 codec, but do not use
+                // need 264 codec, but do not use
                 _this.playParam.videoCodec = def.CODEC_H264;
                 let releaseRet = _this.player.release();
                 console.log("releaseRet ===> ", releaseRet);
                 _this.player = null;
-                _this._flvJsPlayer();
+                _this._flvJsPlayer(_this.playParam.durationMs);
             }
             // _this.onLoadFinish && _this.onLoadFinish();
         }; // onProbeFinish
@@ -1487,10 +1896,34 @@ class H265webjsModule {
             if (this.onLoadCacheFinshed != null) this.onLoadCacheFinshed();
         }; // onLoadCacheFinshed
 
+        this.player.onRender = (width, height, imageBufferY, imageBufferB, imageBufferR) => 
+        {
+            _this.snapshotYuvLastFrame.luma     = null;
+            _this.snapshotYuvLastFrame.chromaB  = null;
+            _this.snapshotYuvLastFrame.chromaR  = null;
+
+            _this.snapshotYuvLastFrame.width    = width;
+            _this.snapshotYuvLastFrame.height   = height;
+            _this.snapshotYuvLastFrame.luma     = new Uint8Array(imageBufferY);
+            _this.snapshotYuvLastFrame.chromaB  = new Uint8Array(imageBufferB);
+            _this.snapshotYuvLastFrame.chromaR  = new Uint8Array(imageBufferR);
+
+            // if (_this.snapshotCanvas !== undefined && 
+            //     _this.snapshotCanvas !== null) 
+            // {
+            //     _this.snapshotCanvas.width = width;
+            //     _this.snapshotCanvas.height = height;
+            // }
+
+            if (_this.onRender != null) {
+                _this.onRender(width, height, imageBufferY, imageBufferB, imageBufferR);
+            }
+        }; // onRender
+
         // boot
         this.player.start(this.videoURL);
         // this.playMode = def.PLAYER_MODE_NOTIME_LIVE;
-    } // _cLiveFLVDecoderEntry
+    } // _cWsFLVDecoderEntry
 
     _mpegTsEntry() {
         console.log("entry ts");
@@ -1509,23 +1942,92 @@ class H265webjsModule {
             /*
              * start
              */
-            fetch(_this.videoURL, {signal}).then(res => res.arrayBuffer()).then(streamBuffer => {
-                if (_this.mpegTsObj === undefined 
-                    || _this.mpegTsObj === null) 
-                {
+            // fetch(_this.videoURL, {signal}).then(res => res.arrayBuffer()).then(streamBuffer => {
+            //     if (_this.mpegTsObj === undefined 
+            //         || _this.mpegTsObj === null) 
+            //     {
+            //         controller.abort();
+            //         return;
+            //     }
+
+            //     streamBuffer.fileStart = 0;
+            //     // array buffer to unit8array
+            //     let streamUint8Buf = new Uint8Array(streamBuffer);
+            //     // console.log(streamUint8Buf);
+            //     _this.mpegTsObj.demux(streamUint8Buf);
+            // });
+            let totalData = null;
+            fetch(_this.videoURL, {signal}).then(function(response) {
+                if (!response.headers.has("Content-Length")) {
+                    // fileSize = response.headers.get("Content-Length");
                     controller.abort();
+                    signal = null;
+                    controller = null;
+
+                    // _this.player.release();
+                    // _this.player = null;
+
+                    let playerConfig = {
+                        width: _this.configFormat.playerW,
+                        height: _this.configFormat.playerH,
+                        playerId: _this.configFormat.playerId,
+                        token: _this.configFormat.token,
+                        readyShow: _this.configFormat.extInfo.readyShow,
+                        checkProbe: _this.configFormat.extInfo.checkProbe,
+                        ignoreAudio : _this.configFormat.extInfo.ignoreAudio,
+                        playMode: _this.playMode,
+                        autoPlay: _this.configFormat.extInfo.autoPlay,
+                    };
+                    _this._cLiveFLVDecoderEntry(playerConfig);
+
                     return;
                 }
 
-                streamBuffer.fileStart = 0;
-                // array buffer to unit8array
-                let streamUint8Buf = new Uint8Array(streamBuffer);
-                // console.log(streamUint8Buf);
-                _this.mpegTsObj.demux(streamUint8Buf);
-            });
+                let pump = function(reader) {
+                    return reader.read().then(function(result) {
+                        if (result.done) {
+                            console.log("========== mpegts RESULT DONE ===========");
+                            // fetchFinished = true;
+                            _this.mpegTsObj.demux(totalData);
+                            // window.clearInterval(networkInterval);
+                            // networkInterval = null;
+                            return;
+                        }
+
+                        let chunk = result.value;
+                        if (totalData === null) {
+                            totalData = chunk;
+                        } else {
+                            var tmpBuf = chunk;
+                            var newLen = totalData.length + tmpBuf.length;
+                            var newData = new Uint8Array(newLen);
+                            newData.set(totalData);
+                            newData.set(tmpBuf, totalData.length);
+                            totalData = new Uint8Array(newData);
+
+                            tmpBuf = null;
+                            newData = null;
+                        }
+
+                        // console.log("call chunk", chunk.length);
+                        // rawParser.appendStreamRet(chunk);
+                        return pump(reader);
+                    });
+                }
+                return pump(response.body.getReader());
+            })
+            .catch(function(error) {
+                if (!error.toString().includes('user aborted')) {
+                    const errMsg = 
+                        ' mpegts request error:' + error;
+                    console.error(errMsg);
+                } // end check error
+                
+            }); // end fetch
+
         }; // onReady
         this.mpegTsObj.initMPEG();
-    }
+    } // _mpegTsEntry
 
     /**
      * @brief onReadyOBJ is h265webclazz
@@ -1567,7 +2069,7 @@ class H265webjsModule {
 
         //TODO: get all the data at once syncronously or feed data through a callback if streamed
         _this._avFeedMP4Data(0, 0);
-    }
+    } // _mpegTsEntryReady
 
     /**
      * @brief m3u8
@@ -1620,22 +2122,22 @@ class H265webjsModule {
 
                 if (!isHevcParam) {
                     alert("is not hevc hls");
-                    // @TODO hls release add mpeg release
+                    // hls release add mpeg release
                     _this.hlsObj.release();
                     if (_this.hlsObj.mpegTsObj) {
                         _this.hlsObj.mpegTsObj.releaseTsDemuxer();
                     }
                     _this.hlsObj = null;
 
-                    _this.playParam.durationMs = -1;
+                    _this.playParam.durationMs = durationMs;
                     _this.playParam.fps = fps;
                     _this.playParam.sampleRate = sampleRate;
                     _this.playParam.size = size;
                     _this.playParam.audioNone = aCodec == "";
                     _this.playParam.videoCodec = isHevcParam ? 0 : 1;
-                    console.log("this.playParam: ", _this.playParam);
+                    console.log("this.playParam: ", _this.playParam, durationMs);
                     // _this.onLoadFinish && _this.onLoadFinish();
-                    _this._videoJsPlayer(); // @TODO videojs
+                    _this._videoJsPlayer(durationMs); // videojs
                     return;
                 } // end is hevc
 
@@ -1649,7 +2151,7 @@ class H265webjsModule {
         // start
         this.hlsObj.demux(this.videoURL);
 
-    } // end m3u8
+    } // _m3u8Entry end m3u8
 
     _hlsOnSamples(readyObj, frame) {
         let _this = this;
@@ -1661,16 +2163,18 @@ class H265webjsModule {
             _this.player.appendAACFrame(frame);
         }
 
-    }; // end onSamples
+    }; // _hlsOnSamples end onSamples
 
     // videojs
-    _videoJsPlayer() {
+    _videoJsPlayer(probeDurationMS=-1) {
         let _this = this;
         let playerConfig = {
+            probeDurationMS: probeDurationMS,
             width: this.configFormat.playerW,
             height: this.configFormat.playerH,
             playerId: this.configFormat.playerId,
             ignoreAudio : this.configFormat.extInfo.ignoreAudio,
+            autoPlay: this.configFormat.extInfo.autoPlay,
         }; // playerConfig
         this.player = new NvVideoJSCore.NvVideojsCore(playerConfig);
         this.player.onMakeItReady = () => {
@@ -1689,6 +2193,8 @@ class H265webjsModule {
                 _this.playParam.durationMs = _this.player.duration * 1000;
                 _this.playMode = def.PLAYER_MODE_VOD
             }
+
+            console.log("vjs _this.playParam.", _this.playParam, _this.player.duration, _this.player.getSize());
 
             _this.onLoadFinish && _this.onLoadFinish();
         }; // onLoadFinish
@@ -1713,19 +2219,24 @@ class H265webjsModule {
         this.player.onSeekFinish = () => {
             _this.onSeekFinish && _this.onSeekFinish();
         }; // onSeekFinish
+        this.player.onPlayState = (status) => {
+            _this.onPlayState && _this.onPlayState(status);
+        }; // onPlayState
         this.player.makeIt(this.videoURL);
 
     } // _videoJsPlayer
 
-    _flvJsPlayer() {
-        console.log("_flvJsPlayer");
+    _flvJsPlayer(durParams=-1) {
         let _this = this;
         let playerConfig = {
             width: this.configFormat.playerW,
             height: this.configFormat.playerH,
             playerId: this.configFormat.playerId,
             ignoreAudio : this.configFormat.extInfo.ignoreAudio,
+            duration: durParams,
+            autoPlay: this.configFormat.extInfo.autoPlay,
         }; // playerConfig
+        console.log("_flvJsPlayer", playerConfig);
         this.player = new NvFlvJSCore.NvFlvjsCore(playerConfig);
         this.player.onLoadFinish = () => {
             alert("_videoJsPlayer onLoadFinish");
@@ -1761,6 +2272,10 @@ class H265webjsModule {
                 _this.onPlayFinish();
             }
         }; // onPlayingFinish
+        this.player.onPlayState = (status) => {
+            _this.onPlayState && _this.onPlayState(status);
+        }; // onPlayState
+
         // this.player.onSeekFinish = () => {
         //     _this.onSeekFinish && _this.onSeekFinish();
         // }; // onSeekFinish
@@ -1840,7 +2355,7 @@ class H265webjsModule {
         // }, 1);
     }
 
-    // @TODO append raw 265 nalu frame
+    // append raw 265 nalu frame
     /**
      * @brief append frame when 265 raw mode
      * @param Uint8Array frame

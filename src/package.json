@@ -26,6 +26,7 @@
     "dev": "nodemon --exec 'npm start -s' --ignore bundle*"
   },
   "dependencies": {
+    "@babel/core": "^7.20.12",
     "@babel/preset-env": "^7.12.11",
     "babelify": "^10.0.0",
     "browserify": "^16.5.1",
